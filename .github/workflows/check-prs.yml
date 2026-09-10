@@ -26,19 +26,29 @@ jobs:
           touch seen_prs.txt
 
           repos=$(gh repo list "$GH_USER" --limit 100 --json name -q '.[].name')
+          echo "=== Repos found ==="
+          echo "$repos"
+          echo "===================="
 
           for repo in $repos; do
+            echo "--- Checking $repo ---"
             prs=$(gh pr list --repo "$GH_USER/$repo" --state open --json number,title,url,author -q '.[] | "\(.number)|\(.title)|\(.url)|\(.author.login)"')
+            echo "PRs found: $prs"
 
             while IFS='|' read -r number title url author; do
               [ -z "$number" ] && continue
               id="${repo}#${number}"
+              echo "Processing PR id: $id"
 
               if ! grep -qxF "$id" seen_prs.txt; then
+                echo "NEW PR — sending to Slack: $id"
                 echo "$id" >> seen_prs.txt
-                curl -sS -X POST -H 'Content-Type: application/json' \
+                response=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" -X POST -H 'Content-Type: application/json' \
                   -d "{\"text\": \"🔔 New PR in *${repo}*\n*#${number}:* ${title}\n*By:* ${author}\n<${url}|View PR>\"}" \
-                  "$SLACK_WEBHOOK"
+                  "$SLACK_WEBHOOK")
+                echo "Slack response: $response"
+              else
+                echo "Already seen, skipping: $id"
               fi
             done <<< "$prs"
           done
