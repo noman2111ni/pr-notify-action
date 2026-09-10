@@ -1,13 +1,19 @@
-name: Check all repos for new PRs
+﻿name: Check all repos for new PRs
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # har 5 minute mein chalega
-  workflow_dispatch:         # manually bhi chala sakte hain test ke liye
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    concurrency:
+      group: check-prs
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -15,7 +21,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: seen_prs.txt
-          key: seen-prs-cache
+          key: ${{ runner.os }}-seen-prs-${{ github.repository }}
+          restore-keys: |
+            ${{ runner.os }}-seen-prs-
 
       - name: Check PRs across all repos
         env:
@@ -23,58 +31,80 @@ jobs:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
           GH_USER: noman2111ni
         run: |
+          set -euo pipefail
+
           touch seen_prs.txt
 
-          repos=$(gh repo list "$GH_USER" --limit 100 --json name -q '.[].name')
+          repos=$(gh repo list "$GH_USER" --limit 1000 --json name --jq '.[].name')
 
-          for repo in $repos; do
-            prs=$(gh pr list --repo "$GH_USER/$repo" --state open --json number,title,url,author -q '.[] | "\(.number)|\(.title)|\(.url)|\(.author.login)"')
+          if [ -z "$repos" ]; then
+            echo "No repositories found for $GH_USER"
+            exit 0
+          fi
 
-            while IFS='|' read -r number title url author; do
-              [ -z "$number" ] && continue
+          while IFS= read -r repo; do
+            [ -z "$repo" ] && continue
+
+            gh pr list --repo "$GH_USER/$repo" --state open --json number,title,url,author --jq '.[]' | while IFS= read -r pr; do
+              [ -z "$pr" ] && continue
+
+              number=$(printf '%s' "$pr" | jq -r '.number')
+              title=$(printf '%s' "$pr" | jq -r '.title')
+              url=$(printf '%s' "$pr" | jq -r '.url')
+              author=$(printf '%s' "$pr" | jq -r '.author.login // empty')
+
               id="${repo}#${number}"
 
               if ! grep -qxF "$id" seen_prs.txt; then
                 echo "$id" >> seen_prs.txt
 
-                curl -sS -X POST -H 'Content-Type: application/json' \
-                  -d "{
-                    \"blocks\": [
+                payload=$(jq -nc \
+                  --arg repo "$repo" \
+                  --arg number "$number" \
+                  --arg title "$title" \
+                  --arg author "$author" \
+                  --arg url "$url" \
+                  '{
+                    blocks: [
                       {
-                        \"type\": \"section\",
-                        \"text\": {
-                          \"type\": \"mrkdwn\",
-                          \"text\": \"🔔 *New Pull Request*\"
+                        type: "section",
+                        text: {
+                          type: "mrkdwn",
+                          text: "🔔 *New Pull Request*"
                         }
                       },
                       {
-                        \"type\": \"section\",
-                        \"fields\": [
-                          {\"type\": \"mrkdwn\", \"text\": \"*Repo:*\n\`${repo}\`\"},
-                          {\"type\": \"mrkdwn\", \"text\": \"*PR #:*\n${number}\"},
-                          {\"type\": \"mrkdwn\", \"text\": \"*Title:*\n${title}\"},
-                          {\"type\": \"mrkdwn\", \"text\": \"*Author:*\n${author}\"}
+                        type: "section",
+                        fields: [
+                          { type: "mrkdwn", text: ("*Repo:*\n`" + $repo + "`") },
+                          { type: "mrkdwn", text: ("*PR #:*\n" + $number) },
+                          { type: "mrkdwn", text: ("*Title:*\n" + $title) },
+                          { type: "mrkdwn", text: ("*Author:*\n" + $author) }
                         ]
                       },
                       {
-                        \"type\": \"actions\",
-                        \"elements\": [
+                        type: "actions",
+                        elements: [
                           {
-                            \"type\": \"button\",
-                            \"text\": {\"type\": \"plain_text\", \"text\": \"View PR\"},
-                            \"url\": \"${url}\"
+                            type: "button",
+                            text: { type: "plain_text", text: "View PR" },
+                            url: $url
                           }
                         ]
                       }
                     ]
-                  }" \
+                  }')
+
+                curl -sS -X POST \
+                  -H 'Content-Type: application/json' \
+                  --data "$payload" \
                   "$SLACK_WEBHOOK"
               fi
-            done <<< "$prs"
-          done
+            done
+          done <<< "$repos"
 
       - name: Save state
         uses: actions/cache/save@v4
         with:
           path: seen_prs.txt
-          key: seen-prs-cache
+          key: ${{ runner.os }}-seen-prs-${{ github.repository }}
