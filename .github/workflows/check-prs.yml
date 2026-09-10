@@ -1,0 +1,50 @@
+name: Check all repos for new PRs
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # har 5 minute mein chalega
+  workflow_dispatch:         # manually bhi chala sakte hain test ke liye
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore last-seen state
+        uses: actions/cache@v4
+        with:
+          path: seen_prs.txt
+          key: seen-prs-cache
+
+      - name: Check PRs across all repos
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          GH_USER: noman2111ni
+        run: |
+          touch seen_prs.txt
+
+          repos=$(gh repo list "$GH_USER" --limit 100 --json name -q '.[].name')
+
+          for repo in $repos; do
+            prs=$(gh pr list --repo "$GH_USER/$repo" --state open --json number,title,url,author -q '.[] | "\(.number)|\(.title)|\(.url)|\(.author.login)"')
+
+            while IFS='|' read -r number title url author; do
+              [ -z "$number" ] && continue
+              id="${repo}#${number}"
+
+              if ! grep -qxF "$id" seen_prs.txt; then
+                echo "$id" >> seen_prs.txt
+                curl -sS -X POST -H 'Content-Type: application/json' \
+                  -d "{\"text\": \"🔔 New PR in *${repo}*\n*#${number}:* ${title}\n*By:* ${author}\n<${url}|View PR>\"}" \
+                  "$SLACK_WEBHOOK"
+              fi
+            done <<< "$prs"
+          done
+
+      - name: Save state
+        uses: actions/cache/save@v4
+        with:
+          path: seen_prs.txt
+          key: seen-prs-cache
